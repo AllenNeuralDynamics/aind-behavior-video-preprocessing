@@ -14,17 +14,52 @@ libx264 `-qp 0` (mathematically lossless), yuv444p, `.mp4`.
 
 ## Methods (the menu)
 
-| method   | description                                                       |
-|----------|-------------------------------------------------------------------|
-| `none`   | passthrough (bit-identical file copy)                             |
-| `clahe5` | CLAHE clipLimit 5.0, 8x8 tiles, grayscale replicated to 3 channels. Matches the `lp_clahe5` eye-model training recipe exactly. Defaults match the lp_clahe5 training recipe exactly -- keep them for eye models; values used are recorded in preprocessing.json. |
+| method  | description |
+|---------|-------------|
+| `none`  | passthrough (bit-identical file copy) |
+| `clahe` | CLAHE contrast enhancement: grayscale -> CLAHE -> replicated to 3 identical channels. Parameter defaults (clip limit 5.0, 8x8 tiles) match the `lp_clahe5` eye-model training recipe exactly — keep them for those models. Values actually used are recorded in `preprocessing.json`. |
 
-Adding a method: implement `frame -> frame` in `code/preprocess/<name>.py`,
-register it in `code/preprocess/registry.py` (METHODS + METHOD_PARAMS).
+Adding a method: implement a factory in `code/preprocess/<name>.py`,
+register it in `code/preprocess/registry.py` (METHODS).
+
+## What the CLAHE parameters mean
+
+CLAHE (Contrast-Limited Adaptive Histogram Equalization) boosts local
+contrast: the frame is divided into a grid of tiles, each tile's
+histogram is equalized independently (so a dark pupil region and a
+bright IR-reflection region each get contrast appropriate to *their own*
+brightness range), and results are blended smoothly across tile borders.
+
+- **`--clahe-tile-grid` (default 8)** — the grid is N x N tiles, so 8
+  means 64 local regions per frame. Larger N = smaller tiles = more
+  local adaptation (finer, but can amplify local noise); smaller N
+  approaches ordinary global histogram equalization.
+- **`--clahe-clip-limit` (default 5.0)** — caps how much any tile's
+  contrast may be amplified before the excess is redistributed. Higher =
+  stronger enhancement but more amplified sensor noise; lower = gentler.
+  For scale: OpenCV's own default is 2.0 (mild). 5.0 is a moderately
+  aggressive setting chosen when training the eye models to sharpen
+  pupil and corneal-reflection edges under IR illumination.
+
+Illustrative settings:
+
+| clip limit | tile grid | character |
+|-----------:|----------:|-----------|
+| 2.0 | 8 | mild, OpenCV default — general-purpose cleanup |
+| **5.0** | **8** | **the `lp_clahe5` eye-model training recipe (our defaults)** |
+| 10.0 | 16 | very aggressive + very local — strong edges, visible noise |
+
+**The rule that matters:** a model must be inferred with the *same*
+preprocessing it was trained with. For `lp_clahe5`-family eye models,
+keep the defaults; changing them produces frames the model never saw in
+training and silently degrades tracking. The parameters exist for
+*other* teams/models trained with their own recipes.
 
 ## Parameters
 
-- `--method` (`none` | `clahe5`): which transform to apply.
+- `--method` (`none` | `clahe`): which transform to apply.
+- `--clahe-clip-limit` (float, default 5.0) / `--clahe-tile-grid`
+  (int, default 8): see above; only used when `--method clahe`.
 - `--video-glob` (default `**/*.mp4`): selects input videos under `/data`.
 - env `PREPROC_MAX_FRAMES`: cap frames for smoke tests.
 
@@ -37,5 +72,5 @@ register it in `code/preprocess/registry.py` (METHODS + METHOD_PARAMS).
 
 ## Tests
 
-`pytest tests/` — includes a pixel-parity test asserting `clahe5` is
-identical to the eye-tracking capsule's training recipe.
+`pytest tests/` — includes a pixel-parity test asserting `clahe` matches
+the eye-tracking capsule's training recipe exactly.
