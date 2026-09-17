@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -ex
+
+# Behavior Video Preprocessing capsule entrypoint.
+python -u run_capsule.py "$@"
