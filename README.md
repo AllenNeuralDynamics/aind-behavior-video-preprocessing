@@ -16,11 +16,11 @@ libx264 `-qp 0` (mathematically lossless), yuv444p, `.mp4`.
 
 | method  | description |
 |---------|-------------|
-| `none`  | passthrough (bit-identical file copy) |
-| `clahe` | CLAHE contrast enhancement: grayscale -> CLAHE -> replicated to 3 identical channels. Parameter defaults (clip limit 5.0, 8x8 tiles) match the `lp_clahe5` eye-model training recipe exactly — keep them for those models. Values actually used are recorded in `preprocessing.json`. |
+| `none`  | bypass — writes **no output videos**, only the manifest; downstream should keep using the original data asset |
+| `clahe` | CLAHE contrast enhancement: grayscale → CLAHE → replicated to 3 identical channels. Parameter defaults (clip limit 5.0, 8×8 tiles) match the `lp_clahe5` eye-model training recipe exactly — keep them for those models. Values actually used are recorded in `preprocessing.json`. |
 
 Adding a method: implement a factory in `code/preprocess/<name>.py`,
-register it in `code/preprocess/registry.py` (METHODS).
+register it in `code/preprocess/registry.py` (`METHODS`).
 
 ## What the CLAHE parameters mean
 
@@ -30,16 +30,16 @@ histogram is equalized independently (so a dark pupil region and a
 bright IR-reflection region each get contrast appropriate to *their own*
 brightness range), and results are blended smoothly across tile borders.
 
-- **`--clahe-tile-grid` (default 8)** — the grid is N x N tiles, so 8
-  means 64 local regions per frame. Larger N = smaller tiles = more
-  local adaptation (finer, but can amplify local noise); smaller N
-  approaches ordinary global histogram equalization.
-- **`--clahe-clip-limit` (default 5.0)** — caps how much any tile's
-  contrast may be amplified before the excess is redistributed. Higher =
-  stronger enhancement but more amplified sensor noise; lower = gentler.
-  For scale: OpenCV's own default is 2.0 (mild). 5.0 is a moderately
+- **clip limit (default 5.0)** — caps how much any tile's contrast may
+  be amplified before the excess is redistributed. Higher = stronger
+  enhancement but more amplified sensor noise; lower = gentler. For
+  scale: OpenCV's own default is 2.0 (mild). 5.0 is a moderately
   aggressive setting chosen when training the eye models to sharpen
   pupil and corneal-reflection edges under IR illumination.
+- **tile grid (default 8)** — the grid is N×N tiles, so 8 means 64
+  local regions per frame. Larger N = smaller tiles = more local
+  adaptation (finer, but can amplify local noise); smaller N approaches
+  ordinary global histogram equalization.
 
 Illustrative settings:
 
@@ -55,22 +55,66 @@ keep the defaults; changing them produces frames the model never saw in
 training and silently degrades tracking. The parameters exist for
 *other* teams/models trained with their own recipes.
 
-## Parameters
+## How it runs
 
-- `--method` (`none` | `clahe`): which transform to apply.
-- `--clahe-clip-limit` (float, default 5.0) / `--clahe-tile-grid`
-  (int, default 8): see above; only used when `--method clahe`.
-- `--video-glob` (default `**/*.mp4`): selects input videos under `/data`.
-- env `PREPROC_MAX_FRAMES`: cap frames for smoke tests.
+`run` (the capsule entrypoint) maps Code Ocean App Panel values —
+passed as positional arguments, in panel field order — onto the CLI
+flags, with defaults on every position:
+
+| # | panel field | flag | `run` default |
+|---|-------------|------|---------------|
+| 1 | method | `--method` | `clahe` |
+| 2 | video glob | `--video-glob` | `**/*[eE]ye*.mp4` (the Eye video) |
+| 3 | clahe clip limit | `--clahe-clip-limit` | 5.0 |
+| 4 | clahe tile grid | `--clahe-tile-grid` | 8 |
+| 5 | workers | `--workers` | 8 |
+
+So a **Reproducible Run with an empty panel performs the standard eye
+CLAHE pass**; selecting `none` bypasses in seconds. Direct CLI use
+(`python -u run_capsule.py --method … --video-glob …`) is unchanged;
+there the argparse defaults apply (`--method none`,
+`--video-glob "**/*.mp4"`, `--workers` = number of CPUs capped at 8).
+
+## Parallel chunked processing
+
+With `--workers N` the video is split into N contiguous frame ranges;
+each worker (its own process, explicit `spawn` context) decodes its
+range, applies the transform, and encodes its own lossless part; parts
+are joined by ffmpeg **stream copy** (no re-encode). Because the
+transform is per-frame and every step is lossless, chunked output is
+pixel-identical to sequential — enforced by tests and by built-in
+verification. `--workers 1` runs the original sequential path.
+`PREPROC_MAX_FRAMES` (smoke tests) forces sequential.
+
+Failure philosophy — every ambiguity is a loud stop, never a guess:
+
+- container reporting invalid metadata (fps / width / height / frame
+  count missing or ≤ 0) → error before any work starts
+- a chunk seek that does not land exactly on its start frame → error
+  (with "rerun with `--workers 1`" guidance)
+- a chunk reading fewer frames than assigned → error
+- joined output whose frame count differs from frames processed → error
+
+Each video's log starts with its facts
+(`video facts: 658x492  60 fps  249916 frames (~69.4 min)`); chunk
+progress lines report throughput as `frames/s processed` (machine
+speed — not the video's fps).
 
 ## Outputs
 
-- `/results/<relative path below the data asset>/<video>.mp4` — transformed,
-  lossless.
-- `/results/preprocessing.json` — method, parameters, per-video frame counts
-  and input hashes. Written last (success marker).
+- `/results/<relative path below the data asset>/<video>.mp4` —
+  transformed, lossless (`clahe`); nothing for `none`.
+- `/results/preprocessing.json` — method, parameters, workers, per-video
+  facts, per-chunk frame counts, and input content hashes. Written last
+  (success marker).
 
 ## Tests
 
-`pytest tests/` — includes a pixel-parity test asserting `clahe` matches
-the eye-tracking capsule's training recipe exactly.
+`python -m pytest tests -q` from `code/` — 6 tests:
+
+- `test_clahe_parity.py` — the `clahe` transform matches the
+  eye-tracking training recipe exactly (pixel parity vs reference,
+  `none` is identity, output channels identical).
+- `test_chunked_parity.py` — chunked output is **pixel-identical** to
+  sequential (max abs diff = 0) on a video whose frame count does not
+  divide evenly; absurd worker counts are capped; short reads raise.

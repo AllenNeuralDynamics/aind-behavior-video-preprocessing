@@ -2,4 +2,25 @@
 set -ex
 
 # Behavior Video Preprocessing capsule entrypoint.
-python -u run_capsule.py "$@"
+#
+# Code Ocean's App Panel passes parameter VALUES as positional arguments,
+# in the panel's field order. Map them to the CLI flags here. Every
+# position has a default, so terminal runs with no arguments still work,
+# and extra flags can always be passed manually:
+#   bash run                                  # defaults: clahe on the Eye video
+#   bash run none                             # bypass (no outputs, manifest only)
+#   python -u run_capsule.py --method clahe   # direct CLI, unchanged
+#
+# App Panel field order (must match):
+#   1 method          (none | clahe)          default clahe
+#   2 video glob                              default **/*[eE]ye*.mp4
+#   3 clahe clip limit                        default 5.0
+#   4 clahe tile grid                         default 8
+#   5 workers         (1 = sequential)        default 8 (capped by CPUs in code)
+
+python -u run_capsule.py \
+    --method            "${1:-clahe}" \
+    --video-glob        "${2:-**/*[eE]ye*.mp4}" \
+    --clahe-clip-limit  "${3:-5.0}" \
+    --clahe-tile-grid   "${4:-8}" \
+    --workers           "${5:-8}"
