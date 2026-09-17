@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import multiprocessing
 import os
 import shutil
 import subprocess
@@ -224,7 +225,7 @@ def process_video(video: Path, out_path: Path, method: str,
         print(f"  chunking into {workers} ranges of ~{total // workers} frames",
               flush=True)
         chunk_frames = [0] * workers
-        with ProcessPoolExecutor(max_workers=workers) as pool:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
             futures = {
                 pool.submit(_transform_range, str(video), start, count,
                             str(part), method, args, width, height, fps,
