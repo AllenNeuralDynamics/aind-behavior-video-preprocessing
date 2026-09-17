@@ -18,6 +18,6 @@ RUN apt-get update \
 # Python deps: headless OpenCV for frame transforms, pytest for the
 # parity tests. Deliberately minimal -- no torch/LP/pandas here.
 RUN pip install -U --no-cache-dir \
-    numpy \
-    opencv-python-headless \
-    pytest
+    numpy==2.5.3 \
+    opencv-python-headless==5.0.0.93 \
+    pytest==9.1.1
