@@ -1,30 +1,29 @@
 """Behavior Video Preprocessing capsule.
 
-Finds behavior video(s) under /data, applies the selected preprocessing
-method to every frame, and writes a LOSSLESS re-encoded video to /results,
-mirroring the input's relative path so downstream capsules see the same
-layout (e.g. behavior-videos/Eye/video.mp4 stays at that relative path).
+The capsule is driven by ONE thing: a config file. It reads
+/data/preprocessing.yaml (or the path given via --config), applies the
+ordered preprocessing steps to every matching video, and writes LOSSLESS
+re-encoded videos to /results, mirroring the input's relative layout.
 
-Also writes results/preprocessing.json recording the method, its
-parameters, and per-video facts, for provenance.
+    # /data/preprocessing.yaml -- the config file (REQUIRED)
+    video_glob: "**/*[eE]ye*.mp4"   # optional, default **/*.mp4
+    workers: 8                       # optional, default min(8, CPUs)
+    steps:                           # required; [] = bypass (no outputs)
+      - method: clahe
+        clip_limit: 5.0
+        tile_grid: 8
 
-Lossless choice: libx264 with -qp 0 (mathematically lossless), yuv444p,
-keeping the .mp4 extension so downstream path expectations are unchanged.
-Frames are piped raw to ffmpeg.
+Steps compose per-frame (frame -> step1 -> step2 -> ONE lossless encode),
+so chunked parallelism is unaffected. Validation is loud: a missing
+config file, unknown keys, unknown methods, or unknown per-method parameters
+all fail immediately with the allowed options named.
 
-PARALLEL CHUNKING: with --workers N (default: all CPUs, max 8),
-the video is split into N contiguous frame ranges; each worker decodes its
-range, applies the transform, and encodes its own lossless part; the parts
-are then concatenated with ffmpeg stream copy (no re-encode). Because the
-transform is per-frame and every step is lossless, the chunked output is
-pixel-identical to the sequential one -- enforced by tests and by built-in
-frame-count verification. --workers 1 runs the original sequential path.
+Lossless: libx264 -qp 0 (mathematically lossless), yuv444p, .mp4.
+Also writes results/preprocessing.json recording the ordered steps with
+the parameter values actually applied (provenance; written last as the
+success marker).
 
-Usage:
-    python code/run_capsule.py --method clahe --video-glob "**/*[eE]ye*.mp4"
-    python code/run_capsule.py --method none                # passthrough copy
-Env:
-    PREPROC_MAX_FRAMES  optional cap for smoke tests (forces sequential).
+Env: PREPROC_MAX_FRAMES  optional frame cap for smoke tests (sequential).
 """
 from __future__ import annotations
 
@@ -47,41 +46,90 @@ from preprocess.registry import METHODS
 DATA_DIR = Path("/data")
 RESULTS_DIR = Path("/results")
 SCRATCH_DIR = Path(os.environ.get("PREPROC_SCRATCH", "/scratch"))
+#: auto-detected config location (Manager-writable in the future pipeline)
+DEFAULT_CONFIG = Path("/data/preprocessing.yaml")
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--method",
-        default="none",
-        choices=sorted(METHODS),
-        help="preprocessing method to apply (the menu)",
-    )
-    p.add_argument(
-        "--clahe-clip-limit",
-        type=float,
-        default=DEFAULT_CLIP_LIMIT,
-        help="clahe: contrast clip limit (default = lp_clahe5 training recipe)",
-    )
-    p.add_argument(
-        "--clahe-tile-grid",
-        type=int,
-        default=DEFAULT_TILE_GRID,
-        help="clahe: tile grid size NxN (default = lp_clahe5 training recipe)",
-    )
-    p.add_argument(
-        "--video-glob",
-        default="**/*.mp4",
-        help="glob (relative to /data) selecting input videos",
-    )
-    p.add_argument(
-        "--workers",
-        type=int,
-        default=min(8, os.cpu_count() or 1),
-        help="parallel chunk workers per video (default: all CPUs, max 8; "
-             "1 = sequential, original behavior)",
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help="path to the preprocessing config YAML "
+             f"(default: {DEFAULT_CONFIG})",
     )
     return p.parse_args(argv)
+
+
+def load_spec(path: Path) -> dict:
+    """Load and validate the config file. The config file IS the interface."""
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"config file not found: {path}\n"
+            "This capsule is driven by a config file. Provide one, e.g.:\n"
+            "  # /data/preprocessing.yaml\n"
+            "  video_glob: \"**/*[eE]ye*.mp4\"\n"
+            "  steps:\n"
+            "    - method: clahe\n"
+            "      clip_limit: 5.0\n"
+            "      tile_grid: 8\n"
+        )
+    import yaml  # PyYAML (pinned in the Dockerfile)
+
+    raw = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: top level must be a mapping")
+    allowed = {"video_glob", "workers", "steps"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"{path}: unknown key(s) {sorted(unknown)}; "
+                         f"allowed: {sorted(allowed)}")
+    if "steps" not in raw:
+        raise ValueError(f"{path}: 'steps' is required (may be [] to bypass)")
+    steps_raw = raw["steps"]
+    if not isinstance(steps_raw, list):
+        raise ValueError(f"{path}: 'steps' must be a list (may be empty)")
+    steps = []
+    for i, step in enumerate(steps_raw):
+        if not isinstance(step, dict) or "method" not in step:
+            raise ValueError(f"{path}: steps[{i}] must be a mapping with "
+                             "a 'method' key")
+        method = step["method"]
+        if method not in METHODS:
+            raise ValueError(f"{path}: steps[{i}]: unknown method "
+                             f"'{method}'; available: {sorted(METHODS)}")
+        if method == "none":
+            raise ValueError(f"{path}: steps[{i}]: 'none' is not a step; "
+                             "use an empty steps list to bypass")
+        params = {k: v for k, v in step.items() if k != "method"}
+        METHODS[method](params)  # validate params now, fail loudly
+        steps.append({"method": method, "params": params})
+    return {
+        "video_glob": raw.get("video_glob", "**/*.mp4"),
+        "workers": int(raw.get("workers", min(8, os.cpu_count() or 1))),
+        "steps": steps,
+        "source": str(path),
+    }
+
+
+def build_pipeline(steps: list) -> tuple:
+    """Compose the steps' transforms into one per-frame function.
+
+    Returns (frame_fn, steps_used) where steps_used records each step's
+    method and the parameter values actually applied.
+    """
+    fns, used = [], []
+    for s in steps:
+        fn, params_used = METHODS[s["method"]](s.get("params"))
+        fns.append(fn)
+        used.append({"method": s["method"], "params": params_used})
+
+    def apply(frame):
+        for f in fns:
+            frame = f(frame)
+        return frame
+
+    return apply, used
 
 
 def find_videos(pattern: str) -> list[Path]:
@@ -139,16 +187,17 @@ def _ffmpeg_writer(out_path: Path, width: int, height: int, fps: float):
 
 
 def _transform_range(video: str, start: int, n_frames: int, out_path: str,
-                     method: str, args_ns: argparse.Namespace,
+                     steps: list,
                      width: int, height: int, fps: float,
                      label: str) -> int:
     """Decode [start, start+n_frames) of video, transform, encode losslessly.
 
-    Runs in a worker process (spawn): rebuilds the frame transform locally.
+    Runs in a worker process (spawn): rebuilds the step transforms
+    locally from the picklable steps spec and composes them in order.
     Returns the number of frames written; raises if the count is short
     (e.g. inaccurate seek or truncated read), so failures are loud.
     """
-    transform, _ = METHODS[method](args_ns)
+    transform, _ = build_pipeline(steps)
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise RuntimeError(f"cannot open {video}")
@@ -195,9 +244,8 @@ def _concat_parts(parts: list[Path], out_path: Path) -> None:
     )
 
 
-def process_video(video: Path, out_path: Path, method: str,
-                  args: argparse.Namespace, workers: int,
-                  max_frames: int | None) -> dict:
+def process_video(video: Path, out_path: Path, steps: list,
+                  workers: int, max_frames: int | None) -> dict:
     """Transform one video and encode losslessly, chunked across workers."""
     fps, width, height, total = video_facts(video)
     print(f"  video facts: {width}x{height}  {fps:g} fps  {total} frames "
@@ -212,8 +260,8 @@ def process_video(video: Path, out_path: Path, method: str,
     workers = max(1, min(workers, total))
 
     if workers == 1:
-        n = _transform_range(str(video), 0, total, str(out_path), method,
-                             args, width, height, fps, label="seq")
+        n = _transform_range(str(video), 0, total, str(out_path), steps,
+                             width, height, fps, label="seq")
         chunk_frames = [n]
     else:
         bounds = [round(i * total / workers) for i in range(workers + 1)]
@@ -228,7 +276,7 @@ def process_video(video: Path, out_path: Path, method: str,
         with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
             futures = {
                 pool.submit(_transform_range, str(video), start, count,
-                            str(part), method, args, width, height, fps,
+                            str(part), steps, width, height, fps,
                             label): i
                 for i, (start, count, part, label) in enumerate(jobs)
             }
@@ -262,11 +310,15 @@ def process_video(video: Path, out_path: Path, method: str,
 def main() -> None:
     args = parse_args()
     max_frames = int(os.environ.get("PREPROC_MAX_FRAMES", 0)) or None
-    workers = max(1, args.workers)
-    videos = find_videos(args.video_glob)
-    _, method_params = METHODS[args.method](args)
-    print(f"method={args.method}  params={method_params}  "
-          f"videos={len(videos)}  workers={workers}", flush=True)
+    spec = load_spec(Path(args.config))
+    workers = max(1, int(spec["workers"]))
+    videos = find_videos(spec["video_glob"])
+    _, steps_used = build_pipeline(spec["steps"])
+    method_label = "+".join(s["method"] for s in steps_used) or "none"
+    print(f"steps={method_label}  "
+          f"params={[s['params'] for s in steps_used]}  "
+          f"videos={len(videos)}  workers={workers}  "
+          f"(config: {spec['source']})", flush=True)
 
     records = []
     for video in videos:
@@ -276,22 +328,23 @@ def main() -> None:
         print(f"processing {rel} -> {out_path.relative_to(RESULTS_DIR)}",
               flush=True)
 
-        if args.method == "none":
+        if not spec["steps"]:
             # bypass: no transform requested -- do not spend time/space
             # copying inputs; downstream should use the original asset.
-            print("  method=none: bypass (no output video written)",
+            print("  no steps: bypass (no output video written)",
                   flush=True)
             records.append({"input": str(video), "output": None,
                             "frames_processed": None, "bypassed": True})
         else:
-            records.append(process_video(video, out_path, args.method, args,
+            records.append(process_video(video, out_path, spec["steps"],
                                          workers, max_frames))
 
     manifest = {
-        "method": args.method,
-        "method_params": method_params,
+        "method": method_label,
+        "steps": steps_used,
+        "spec_source": spec["source"],
         "encoder": "libx264 -qp 0 yuv444p (lossless); chunked parts joined "
-                   "by ffmpeg stream copy" if args.method != "none"
+                   "by ffmpeg stream copy" if spec["steps"]
                    else "none (bypassed)",
         "workers": workers,
         "videos": records,
