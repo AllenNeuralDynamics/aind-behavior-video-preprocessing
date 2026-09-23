@@ -20,4 +20,5 @@ RUN apt-get update \
 RUN pip install -U --no-cache-dir \
     numpy==2.5.3 \
     opencv-python-headless==5.0.0.93 \
-    pytest==9.1.1
+    pytest==9.1.1 \
+    pyyaml==6.0.2

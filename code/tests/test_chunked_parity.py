@@ -42,9 +42,8 @@ def source_video(tmp_path_factory) -> Path:
 
 
 def _run(video: Path, out: Path, workers: int) -> dict:
-    args = run_capsule.parse_args([
-        "--method", "clahe", "--workers", str(workers)])
-    return run_capsule.process_video(video, out, "clahe", args, workers, None)
+    steps = [{"method": "clahe", "params": {}}]
+    return run_capsule.process_video(video, out, steps, workers, None)
 
 
 def _decode_all(path: Path) -> np.ndarray:
@@ -88,8 +87,8 @@ def test_worker_count_capped_by_frames(source_video, tmp_path, monkeypatch):
 
 
 def test_short_read_is_loud(source_video, tmp_path):
-    args = run_capsule.parse_args(["--method", "clahe"])
     with pytest.raises(RuntimeError, match="expected"):
         run_capsule._transform_range(
             str(source_video), 0, N_FRAMES + 10,   # ask for more than exists
-            str(tmp_path / "short.mp4"), "clahe", args, W, H, FPS, "t")
+            str(tmp_path / "short.mp4"),
+            [{"method": "clahe", "params": {}}], W, H, FPS, "t")
