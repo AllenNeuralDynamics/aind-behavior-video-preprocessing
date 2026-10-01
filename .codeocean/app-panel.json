@@ -1,0 +1,13 @@
+{
+	"version": 1,
+	"parameters": [
+		{
+			"id": "uGvLuLM1RHYO5JtU",
+			"name": "Config path",
+			"help_text": "Path or glob to the preprocessing.yaml. Standalone: attach it as a data asset at /data/preprocessing.yaml. In the pipeline the manager writes /data/videoN/preprocessing.yaml; the default glob picks it up.",
+			"type": "text",
+			"value_type": "string",
+			"default_value": "/data/*/preprocessing.yaml"
+		}
+	]
+}
