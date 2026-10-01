@@ -4,5 +4,24 @@ set -ex
 # Behavior Video Preprocessing capsule entrypoint.
 # The capsule is driven by a config file (see README). Optional App
 # Panel field 1 = config path; default /data/preprocessing.yaml.
+# A glob is accepted (e.g. /data/*/preprocessing.yaml) and must resolve
+# to exactly one file.
 
-python -u run_capsule.py --config "${1:-/data/preprocessing.yaml}"
+CONFIG_ARG="${1:-/data/preprocessing.yaml}"
+# shellcheck disable=SC2206  # intentional glob expansion
+CONFIGS=( $CONFIG_ARG )
+if [ "${#CONFIGS[@]}" -ne 1 ]; then
+    echo "config path must resolve to exactly one file, got ${#CONFIGS[@]}: $CONFIG_ARG" >&2
+    exit 1
+fi
+CONFIG="${CONFIGS[0]}"
+
+python -u run_capsule.py --config "$CONFIG"
+
+# Pipeline mode: the manager writes /data/videoN/{config.yaml,preprocessing.yaml}.
+# Carry that directory through to /results so the next capsule (Lightning Pose)
+# receives the per-video config alongside the preprocessed video.
+CFG_DIR="$(dirname "$CONFIG")"
+if [ "$CFG_DIR" != "/data" ] && [ -f "$CFG_DIR/config.yaml" ]; then
+    cp -r "$CFG_DIR" "/results/$(basename "$CFG_DIR")"
+fi
