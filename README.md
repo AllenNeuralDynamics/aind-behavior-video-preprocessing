@@ -1,6 +1,6 @@
 # Behavior Video Preprocessing
 
-This capsule preprocesses behavior videos (e.g. CLAHE contrast enhancement of the Eye camera video) and writes lossless copies of the processed videos to `/results`. Use it to prepare videos for pose-estimation models that were trained on preprocessed frames — for example the `lp_clahe5` eye-tracking models, whose training recipe is this capsule's default setting.
+This capsule preprocesses behavior videos (e.g. CLAHE contrast enhancement of the Eye camera video) and writes near-lossless, GPU-decodable copies of the processed videos to `/results`. Use it to prepare videos for pose-estimation models that were trained on preprocessed frames — for example the `lp_clahe5` eye-tracking models, whose training recipe is this capsule's default setting.
 
 > **Rule of thumb:** a model must see the same preprocessing at inference that it saw at training. If you are preparing videos for the lp_clahe5 eye models, use the default CLAHE settings shown below and don't change them.
 
@@ -54,7 +54,7 @@ The capsule fails immediately with a message naming what's allowed — it never 
 
 Everything lands in `/results`:
 
-- **Processed videos**, mirroring the input folder layout (e.g. `/data/<asset>/a/b/Eye_video.mp4` → `/results/a/b/Eye_video.mp4`). The encoding is *mathematically lossless* (`libx264 -qp 0`, `yuv444p`, `.mp4`), so no quality is lost beyond the preprocessing you asked for.
+- **Processed videos**, mirroring the input folder layout (e.g. `/data/<asset>/a/b/Eye_video.mp4` → `/results/a/b/Eye_video.mp4`). The encoding is near-lossless H.264 (`libx264 -crf 12`, `yuv420p`): lossless 4:4:4 is not used because the GPU decoder in Lightning Pose cannot read it.
 - **`preprocessing.json`** — a record of what was actually done: the steps and parameter values applied, each input video (with a checksum), frame counts, dimensions, fps, and timing. This file is written last, so **if it's present, the run succeeded**; if it's missing, treat the run as failed.
 
 ## Methods
@@ -74,7 +74,7 @@ The defaults match the **lp_clahe5** eye-model training recipe exactly — for t
 
 ## Parallel Chunked Processing
 
-Each video is split into `workers` frame ranges that are processed in parallel, each encoded losslessly, then joined with an ffmpeg stream copy (no re-encode). The result is identical to processing the video sequentially. Set `workers: 1` in the config to process sequentially.
+Each video is split into `workers` frame ranges that are processed in parallel, each encoded, then joined with an ffmpeg stream copy (no re-encode). The result is identical to processing the video sequentially. Set `workers: 1` in the config to process sequentially.
 
 ## Tests
 

@@ -13,12 +13,12 @@ re-encoded videos to /results, mirroring the input's relative layout.
         clip_limit: 5.0
         tile_grid: 8
 
-Steps compose per-frame (frame -> step1 -> step2 -> ONE lossless encode),
+Steps compose per-frame (frame -> step1 -> step2 -> ONE encode),
 so chunked parallelism is unaffected. Validation is loud: a missing
 config file, unknown keys, unknown methods, or unknown per-method parameters
 all fail immediately with the allowed options named.
 
-Lossless: libx264 -qp 0 (mathematically lossless), yuv444p, .mp4.
+Encoding: libx264 -crf 12, yuv420p, High profile, .mp4 -- near-lossless and GPU-decodable (NVDEC cannot decode H.264 4:4:4, which x264 lossless requires).
 Also writes results/preprocessing.json recording the ordered steps with
 the parameter values actually applied (provenance; written last as the
 success marker).
@@ -172,15 +172,15 @@ def video_facts(video: Path) -> tuple[float, int, int, int]:
 
 
 def _ffmpeg_writer(out_path: Path, width: int, height: int, fps: float):
-    """Raw BGR in -> mathematically lossless H.264 (-qp 0) out."""
+    """Raw BGR in -> near-lossless 4:2:0 H.264 (crf 12, High profile) out."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-s", f"{width}x{height}", "-r", f"{fps}",
         "-i", "-",
-        "-c:v", "libx264", "-qp", "0", "-preset", "veryfast",
-        "-pix_fmt", "yuv444p",
+        "-c:v", "libx264", "-crf", "12", "-preset", "veryfast",
+        "-pix_fmt", "yuv420p", "-profile:v", "high",
         str(out_path),
     ]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -190,7 +190,7 @@ def _transform_range(video: str, start: int, n_frames: int, out_path: str,
                      steps: list,
                      width: int, height: int, fps: float,
                      label: str) -> int:
-    """Decode [start, start+n_frames) of video, transform, encode losslessly.
+    """Decode [start, start+n_frames) of video, transform, encode.
 
     Runs in a worker process (spawn): rebuilds the step transforms
     locally from the picklable steps spec and composes them in order.
@@ -232,7 +232,7 @@ def _transform_range(video: str, start: int, n_frames: int, out_path: str,
 
 
 def _concat_parts(parts: list[Path], out_path: Path) -> None:
-    """Losslessly join encoded parts with ffmpeg stream copy (no re-encode)."""
+    """Join encoded parts with ffmpeg stream copy (no re-encode, no extra loss)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     list_file = parts[0].parent / "parts.txt"
     list_file.write_text("".join(f"file '{p}'\n" for p in parts))
@@ -246,7 +246,7 @@ def _concat_parts(parts: list[Path], out_path: Path) -> None:
 
 def process_video(video: Path, out_path: Path, steps: list,
                   workers: int, max_frames: int | None) -> dict:
-    """Transform one video and encode losslessly, chunked across workers."""
+    """Transform one video and encode it, chunked across workers."""
     fps, width, height, total = video_facts(video)
     print(f"  video facts: {width}x{height}  {fps:g} fps  {total} frames "
           f"(~{total / fps / 60:.1f} min)", flush=True)
@@ -343,7 +343,7 @@ def main() -> None:
         "method": method_label,
         "steps": steps_used,
         "spec_source": spec["source"],
-        "encoder": "libx264 -qp 0 yuv444p (lossless); chunked parts joined "
+        "encoder": "libx264 -crf 12 yuv420p high (near-lossless, NVDEC-decodable); chunked parts joined "
                    "by ffmpeg stream copy" if spec["steps"]
                    else "none (bypassed)",
         "workers": workers,
