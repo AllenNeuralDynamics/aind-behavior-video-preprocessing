@@ -35,6 +35,14 @@ def _make_none(params: Optional[dict] = None) -> Tuple[FrameFn, dict]:
     return (lambda frame: frame), {}
 
 
+def _make_reencode(params: Optional[dict] = None) -> Tuple[FrameFn, dict]:
+    """Identity transform: pixels untouched, but the video is re-encoded to
+    libx264 yuv420p .mp4 so GPU decoders (DALI/NVDEC in Lightning Pose) can
+    read sources they otherwise cannot, e.g. MJPEG .avi from the rigs."""
+    _check_params("reencode", dict(params or {}), set())
+    return (lambda frame: frame), {}
+
+
 def _make_clahe(params: Optional[dict] = None) -> Tuple[FrameFn, dict]:
     p = dict(params or {})
     _check_params("clahe", p, {"clip_limit", "tile_grid"})
@@ -50,5 +58,6 @@ def _make_clahe(params: Optional[dict] = None) -> Tuple[FrameFn, dict]:
 #: method name -> factory(params_dict) -> (frame_fn, params_used)
 METHODS: Dict[str, Callable] = {
     "none": _make_none,
+    "reencode": _make_reencode,
     "clahe": _make_clahe,
 }

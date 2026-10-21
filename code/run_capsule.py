@@ -9,6 +9,7 @@ re-encoded videos to /results, mirroring the input's relative layout.
     video_glob: "**/*[eE]ye*.mp4"   # optional, default **/*.mp4
     workers: 8                       # optional, default min(8, CPUs)
     steps:                           # required; [] = bypass (no outputs)
+      - method: reencode             # identity: only re-encode to H.264 mp4
       - method: clahe
         clip_limit: 5.0
         tile_grid: 8
